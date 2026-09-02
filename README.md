@@ -2,6 +2,60 @@
 
 Native Qt 6 updater/launcher for Project Ebonhold on Linux.
 
+## Download & Use
+
+You do **not** need to build the launcher yourself.
+
+Download the latest pre-built AppImage from the **[GitHub Releases](../../releases/latest)** page.
+
+### 1. Download
+
+Download:
+
+```text
+EbonholdUpdater-*-x86_64.AppImage
+```
+
+Optionally download the matching `.sha256` file if you want to verify the download.
+
+### 2. Make it executable
+
+Open a terminal in the directory containing the downloaded AppImage:
+
+```bash
+chmod +x EbonholdUpdater-*.AppImage
+```
+
+### 3. Start the launcher
+
+```bash
+./EbonholdUpdater-*.AppImage
+```
+
+You can also start it by double-clicking the AppImage after making it executable.
+
+No installation is required.
+
+### First start
+
+1. Start the Ebonhold Updater.
+2. Log in with your Project Ebonhold account.
+3. Select your Ebonhold / World of Warcraft installation directory.
+4. Let the launcher check the game files.
+5. Download missing or outdated files if required.
+6. Press **Play** to start the game.
+
+For detailed information about AppImage usage, SHA-256 verification, AddOns, HD patches, Wine, Proton, Lutris and troubleshooting, see:
+
+**[AppImage Installation & Usage Guide](README-AppImage.md)**
+
+---
+
+## Building from source
+
+The following sections are intended for users who want to build the launcher themselves.
+
+
 ## Build requirements on CachyOS / Arch
 
 ```bash
