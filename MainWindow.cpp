@@ -2,6 +2,7 @@
 
 #include "AuthManager.h"
 #include "UpdateManager.h"
+#include "OptionalContentDialog.h"
 
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -64,6 +65,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(m_launcherScriptsButton, &QPushButton::clicked,
             this, &MainWindow::showLauncherScriptsDialog);
+
+    connect(m_optionalContentButton, &QPushButton::clicked,
+            this, &MainWindow::requestOptionalContent);
 
     connect(m_addonFolderButton, &QPushButton::clicked, this, [this]() {
         const QString gameDirectory = QDir::cleanPath(m_gamePath->text().trimmed());
@@ -204,11 +208,13 @@ MainWindow::MainWindow(QWidget *parent)
         m_auth->fetchGamesManifest();
     });
     connect(m_auth, &AuthManager::loginFailed, this, [this](const QString &message) {
+        m_optionalContentRequested = false;
         setBusy(false);
         m_status->setText(QStringLiteral("Login failed"));
         QMessageBox::critical(this, QStringLiteral("Ebonhold Login"), message);
     });
     connect(m_auth, &AuthManager::requestFailed, this, [this](const QString &message) {
+        m_optionalContentRequested = false;
         setBusy(false);
         m_status->setText(QStringLiteral("API error"));
         appendLog(message);
@@ -217,6 +223,15 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_auth, &AuthManager::manifestReady, this, [this](const QJsonObject &manifest) {
         m_manifest = manifest;
         m_updater->setAuthToken(m_auth->token());
+
+        if (m_optionalContentRequested) {
+            m_optionalContentRequested = false;
+            setBusy(false);
+            m_status->setText(QStringLiteral("Optional content ready"));
+            showOptionalContentDialog();
+            return;
+        }
+
         appendLog(QStringLiteral("Manifest received. Checking local files..."));
         m_updater->scan(m_gamePath->text(), m_manifest);
     });
@@ -371,6 +386,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
 
     connect(m_updater, &UpdateManager::authenticationExpired, this, [this]() {
+        m_optionalContentRequested = false;
         m_auth->clearToken();
         m_updater->setAuthToken(QString());
         setBusy(false);
@@ -385,7 +401,7 @@ MainWindow::MainWindow(QWidget *parent)
 void MainWindow::buildUi()
 {
     setWindowTitle(QStringLiteral("Ebonhold Updater"));
-    resize(720, 440);
+    resize(900, 500);
 
     auto *central = new QWidget(this);
     auto *layout = new QVBoxLayout(central);
@@ -426,6 +442,9 @@ void MainWindow::buildUi()
     m_launcherScriptsButton = new QPushButton(QStringLiteral("Launcher scripts..."), central);
     m_launcherScriptsButton->setToolTip(
         QStringLiteral("Create optional .sh launchers for Protontricks, Wine or Lutris."));
+    m_optionalContentButton = new QPushButton(QStringLiteral("Optional Content..."), central);
+    m_optionalContentButton->setToolTip(
+        QStringLiteral("Manage official AddOns and optional HD patches."));
     m_addonFolderButton = new QPushButton(QStringLiteral("AddOn Folder"), central);
     m_addonFolderButton->setToolTip(
         QStringLiteral("Open the WoW Interface/AddOns folder in your file manager."));
@@ -433,6 +452,7 @@ void MainWindow::buildUi()
     buttonLayout->addWidget(m_checkButton);
     buttonLayout->addWidget(m_fullRepairButton);
     buttonLayout->addWidget(m_launcherScriptsButton);
+    buttonLayout->addWidget(m_optionalContentButton);
     buttonLayout->addWidget(m_addonFolderButton);
     buttonLayout->addStretch();
     buttonLayout->addWidget(m_playButton);
@@ -460,6 +480,7 @@ void MainWindow::resetUpdateState()
 
     m_pendingUpdates.clear();
     m_fullRepairRequested = false;
+    m_optionalContentRequested = false;
     m_realmlist.clear();
     m_scannedGameDirectory.clear();
     m_manifest = QJsonObject();
@@ -477,6 +498,7 @@ void MainWindow::setBusy(bool busy)
     m_checkButton->setEnabled(!busy);
     m_fullRepairButton->setEnabled(!busy);
     m_launcherScriptsButton->setEnabled(!busy);
+    m_optionalContentButton->setEnabled(!busy);
     m_addonFolderButton->setEnabled(!busy);
     m_playButton->setEnabled(!busy);
 }
@@ -522,6 +544,7 @@ void MainWindow::startCheck(bool fullRepair)
     m_scannedGameDirectory = gameDirectory;
     m_pendingUpdates.clear();
     m_fullRepairRequested = fullRepair;
+    m_optionalContentRequested = false;
     m_realmlist.clear();
     m_checkButton->setText(QStringLiteral("Check for updates"));
     m_log->clear();
@@ -563,6 +586,47 @@ void MainWindow::startUpdate()
 
     m_updater->setAuthToken(m_auth->token());
     m_updater->installUpdates(gameDirectory, m_pendingUpdates, m_realmlist);
+}
+
+void MainWindow::requestOptionalContent()
+{
+    const QString gameDirectory = QDir::cleanPath(m_gamePath->text().trimmed());
+    if (gameDirectory.isEmpty() || !QDir(gameDirectory).exists()) {
+        QMessageBox::warning(this, QStringLiteral("Optional Content"),
+                             QStringLiteral("Select a valid WoW directory first."));
+        return;
+    }
+
+    m_gamePath->setText(gameDirectory);
+    saveSettings();
+    m_optionalContentRequested = true;
+    m_status->setText(QStringLiteral("Loading optional content..."));
+    setBusy(true);
+    m_auth->fetchGamesManifest();
+}
+
+void MainWindow::showOptionalContentDialog()
+{
+    const QString gameDirectory = QDir::cleanPath(m_gamePath->text().trimmed());
+    if (gameDirectory.isEmpty() || !QDir(gameDirectory).exists() || m_manifest.isEmpty())
+        return;
+
+    OptionalContentDialog dialog(gameDirectory, m_auth->token(), m_manifest, this);
+    connect(&dialog, &OptionalContentDialog::authenticationExpired, this, [this]() {
+        m_auth->clearToken();
+        m_updater->setAuthToken(QString());
+        m_optionalContentRequested = true;
+        m_status->setText(QStringLiteral("Session expired"));
+    });
+
+    dialog.exec();
+
+    if (m_optionalContentRequested) {
+        setBusy(true);
+        m_auth->fetchGamesManifest();
+    } else if (!m_busy) {
+        m_status->setText(QStringLiteral("Ready"));
+    }
 }
 
 void MainWindow::showLauncherScriptsDialog()

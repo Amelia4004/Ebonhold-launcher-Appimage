@@ -101,6 +101,54 @@ void UpdateManager::setAuthToken(const QString &token)
     m_authToken = token;
 }
 
+
+std::optional<PatchFile> UpdateManager::findManifestFile(const QJsonObject &manifest,
+                                                         const QString &relativePath,
+                                                         const QString &gameSlug)
+{
+    const QString wantedPath = QDir::cleanPath(relativePath);
+    if (!safeRelativePath(wantedPath))
+        return std::nullopt;
+
+    auto findInArray = [&wantedPath](const QJsonArray &array) -> std::optional<PatchFile> {
+        for (const QJsonValue &value : array) {
+            if (!value.isObject())
+                continue;
+
+            const QJsonObject object = value.toObject();
+            const QString path = QDir::cleanPath(
+                object.value(QStringLiteral("file_path_from_game_root")).toString());
+            if (path.compare(wantedPath, Qt::CaseSensitive) != 0)
+                continue;
+
+            const int id = object.value(QStringLiteral("id")).toInt();
+            const QByteArray md5 =
+                decodeManifestMd5(object.value(QStringLiteral("file_hash")).toString());
+            if (id <= 0 || md5.size() != 32)
+                return std::nullopt;
+
+            return PatchFile{id, path, md5};
+        }
+
+        return std::nullopt;
+    };
+
+    const QJsonObject data = manifest.value(QStringLiteral("data")).toObject();
+    const QJsonArray games = data.value(QStringLiteral("games")).toArray();
+    for (const QJsonValue &value : games) {
+        const QJsonObject game = value.toObject();
+        if (game.value(QStringLiteral("slug")).toString() != gameSlug)
+            continue;
+
+        if (const auto found = findInArray(game.value(QStringLiteral("files")).toArray()))
+            return found;
+        break;
+    }
+
+    return findInArray(data.value(QStringLiteral("common")).toObject()
+                           .value(QStringLiteral("files")).toArray());
+}
+
 QVector<PatchFile> UpdateManager::collectRequiredFiles(const QJsonObject &manifest,
                                                        const QString &gameSlug,
                                                        QString *realmlist,

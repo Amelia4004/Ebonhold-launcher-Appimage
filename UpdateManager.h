@@ -7,6 +7,8 @@
 #include <QString>
 #include <QVector>
 
+#include <optional>
+
 class QCryptographicHash;
 class QNetworkReply;
 class QSaveFile;
@@ -34,6 +36,11 @@ public:
     explicit UpdateManager(QObject *parent = nullptr);
 
     void setAuthToken(const QString &token);
+
+    static std::optional<PatchFile> findManifestFile(
+        const QJsonObject &manifest,
+        const QString &relativePath,
+        const QString &gameSlug = QStringLiteral("roguelike-prod"));
 
     void scan(const QString &gameDirectory,
               const QJsonObject &manifest,

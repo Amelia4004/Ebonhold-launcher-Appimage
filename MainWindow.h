@@ -29,6 +29,8 @@ private:
     void resetUpdateState();
     void showLoginDialog();
     void showLauncherScriptsDialog();
+    void showOptionalContentDialog();
+    void requestOptionalContent();
     void setBusy(bool busy);
     void appendLog(const QString &text);
 
@@ -44,6 +46,7 @@ private:
     QPushButton *m_playButton = nullptr;
     QPushButton *m_launcherScriptsButton = nullptr;
     QPushButton *m_addonFolderButton = nullptr;
+    QPushButton *m_optionalContentButton = nullptr;
     QPlainTextEdit *m_log = nullptr;
 
     QJsonObject m_manifest;
@@ -53,4 +56,5 @@ private:
     bool m_loginDialogOpen = false;
     bool m_fullRepairRequested = false;
     bool m_busy = false;
+    bool m_optionalContentRequested = false;
 };
