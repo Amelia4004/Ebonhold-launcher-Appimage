@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ebonhold Updater
+Comment=Update and repair the Ebonhold game client on Linux
+Exec=EbonholdUpdater
+Icon=ebonhold-updater
+Terminal=false
+Categories=Game;Utility;
+StartupNotify=true

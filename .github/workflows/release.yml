@@ -1,0 +1,65 @@
+name: Create Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Build and release AppImage
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            qt6-base-dev \
+            qt6-base-dev-tools \
+            libarchive-dev \
+            libgl1-mesa-dev \
+            ca-certificates \
+            file
+
+      - name: Semantic Release
+        uses: cycjimmy/semantic-release-action@b12c8f6015dc215fe37bc154d4ad456dd3833c90 # v6.0.0
+        id: semantic
+        with:
+          semantic_version: 25.0.8
+          branches: main
+          extra_plugins: |
+            @semantic-release/exec@7.1.0
+            @semantic-release/github@12.0.9
+        env:
+          # For an unprotected main branch, github.token is enough.
+          # If main is protected by a ruleset that blocks semantic-release,
+          # create the SEMANTIC_RELEASE_TOKEN repository secret as described
+          # in RELEASE_SETUP.md. The expression below will use it automatically.
+          GITHUB_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN || github.token }}
+
+      - name: Release summary
+        if: steps.semantic.outputs.new_release_published == 'true'
+        run: |
+          echo "Released v${{ steps.semantic.outputs.new_release_version }}"
+          echo "Tag: ${{ steps.semantic.outputs.new_release_git_tag }}"

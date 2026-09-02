@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
 
     QCoreApplication::setOrganizationName("EbonholdLinux");
-    QCoreApplication::setApplicationName("EbonholdLauncher");
+    QCoreApplication::setApplicationName("EbonholdUpdater");
     QCoreApplication::setApplicationVersion("0.9.0");
 
     MainWindow window;

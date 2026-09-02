@@ -1,0 +1,114 @@
+cmake_minimum_required(VERSION 3.21)
+
+set(BUILD_DIR "@CMAKE_BINARY_DIR@")
+set(APPDIR "${BUILD_DIR}/AppDir")
+set(TOOLS_DIR "${BUILD_DIR}/appimage-tools")
+set(DIST_DIR "${BUILD_DIR}/dist")
+set(APPIMAGE "${DIST_DIR}/EbonholdUpdater-@PROJECT_VERSION@-x86_64.AppImage")
+set(QMAKE_EXECUTABLE "@EBONHOLD_QMAKE@")
+
+if(NOT "@CMAKE_SYSTEM_NAME@" STREQUAL "Linux")
+    message(FATAL_ERROR "The AppImage target can only be built on Linux.")
+endif()
+
+if(NOT "@CMAKE_SYSTEM_PROCESSOR@" MATCHES "^(x86_64|amd64|AMD64)$")
+    message(FATAL_ERROR "This packaging target currently supports x86_64 only (detected: @CMAKE_SYSTEM_PROCESSOR@).")
+endif()
+
+if(QMAKE_EXECUTABLE STREQUAL "" OR NOT EXISTS "${QMAKE_EXECUTABLE}")
+    message(FATAL_ERROR
+        "Qt qmake was not found. linuxdeploy-plugin-qt needs it to locate Qt resources.\n"
+        "On CachyOS/Arch, qt6-base normally provides /usr/lib/qt6/bin/qmake.")
+endif()
+
+file(MAKE_DIRECTORY "${TOOLS_DIR}" "${DIST_DIR}")
+file(REMOVE_RECURSE "${APPDIR}")
+
+message(STATUS "Staging AppDir...")
+execute_process(
+    COMMAND "@CMAKE_COMMAND@" -E env "DESTDIR=${APPDIR}"
+            "@CMAKE_COMMAND@" --install "${BUILD_DIR}" --prefix /usr --config Release
+    RESULT_VARIABLE INSTALL_RESULT
+)
+if(NOT INSTALL_RESULT EQUAL 0)
+    message(FATAL_ERROR "cmake --install failed with exit code ${INSTALL_RESULT}")
+endif()
+
+function(download_appimage URL PATH)
+    if(NOT EXISTS "${PATH}")
+        message(STATUS "Downloading ${URL}")
+        file(DOWNLOAD "${URL}" "${PATH}"
+            SHOW_PROGRESS
+            TLS_VERIFY ON
+            STATUS DOWNLOAD_STATUS
+        )
+        list(GET DOWNLOAD_STATUS 0 DOWNLOAD_CODE)
+        list(GET DOWNLOAD_STATUS 1 DOWNLOAD_MESSAGE)
+        if(NOT DOWNLOAD_CODE EQUAL 0)
+            file(REMOVE "${PATH}")
+            message(FATAL_ERROR "Download failed: ${DOWNLOAD_MESSAGE}")
+        endif()
+    endif()
+
+    file(CHMOD "${PATH}"
+        PERMISSIONS
+            OWNER_READ OWNER_WRITE OWNER_EXECUTE
+            GROUP_READ GROUP_EXECUTE
+            WORLD_READ WORLD_EXECUTE
+    )
+endfunction()
+
+set(LINUXDEPLOY "${TOOLS_DIR}/linuxdeploy-x86_64.AppImage")
+set(LINUXDEPLOY_QT "${TOOLS_DIR}/linuxdeploy-plugin-qt-x86_64.AppImage")
+
+download_appimage(
+    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+    "${LINUXDEPLOY}"
+)
+download_appimage(
+    "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+    "${LINUXDEPLOY_QT}"
+)
+
+file(REMOVE "${APPIMAGE}")
+
+message(STATUS "Bundling Qt and creating AppImage...")
+execute_process(
+    COMMAND "@CMAKE_COMMAND@" -E env
+        "APPIMAGE_EXTRACT_AND_RUN=1"
+        # linuxdeploy ships its own strip binary. On rolling-release systems
+        # such as Arch/CachyOS it may be too old for modern ELF sections
+        # such as .relr.dyn. Disabling stripping keeps the binaries intact
+        # and avoids packaging failures.
+        "NO_STRIP=1"
+        "QMAKE=${QMAKE_EXECUTABLE}"
+        "PATH=${TOOLS_DIR}:$ENV{PATH}"
+        "LDAI_OUTPUT=${APPIMAGE}"
+        "LINUXDEPLOY_OUTPUT_VERSION=@PROJECT_VERSION@"
+        "${LINUXDEPLOY}"
+        --appdir "${APPDIR}"
+        --plugin qt
+        --output appimage
+    WORKING_DIRECTORY "${BUILD_DIR}"
+    RESULT_VARIABLE LINUXDEPLOY_RESULT
+)
+
+if(NOT LINUXDEPLOY_RESULT EQUAL 0)
+    message(FATAL_ERROR "linuxdeploy failed with exit code ${LINUXDEPLOY_RESULT}")
+endif()
+
+if(NOT EXISTS "${APPIMAGE}")
+    message(FATAL_ERROR "linuxdeploy finished, but ${APPIMAGE} was not created.")
+endif()
+
+file(CHMOD "${APPIMAGE}"
+    PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE
+        WORLD_READ WORLD_EXECUTE
+)
+
+message(STATUS "")
+message(STATUS "AppImage created successfully:")
+message(STATUS "  ${APPIMAGE}")
+message(STATUS "")
