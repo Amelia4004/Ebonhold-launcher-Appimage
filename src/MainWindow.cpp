@@ -157,10 +157,8 @@ MainWindow::MainWindow(QWidget *parent)
             process.setArguments(arguments);
             process.setWorkingDirectory(gameDirectory);
 
-            // An AppImage may inject its own library/plugin paths. External
-            // programs such as Protontricks/Wine should use the host system's
-            // libraries instead of accidentally inheriting Qt libraries from
-            // the updater AppImage.
+            // AppImage sets its own library and plugin paths.
+            // Remove them here so Protontricks/Wine uses the host libraries.
             QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
             if (environment.contains(QStringLiteral("APPIMAGE")) ||
                 environment.contains(QStringLiteral("APPDIR"))) {
@@ -174,9 +172,8 @@ MainWindow::MainWindow(QWidget *parent)
             return process.startDetached();
         };
 
-        // KDE/KIO intentionally refuses to launch executable files through
-        // QDesktopServices. Protontricks provides a native launcher that opens
-        // its Steam/Proton prefix selector and then runs the selected .exe.
+        // KDE/KIO blocks executable files through QDesktopServices.
+        // Use the Protontricks launcher so the prefix selector still opens.
         const QString protontricks = QStandardPaths::findExecutable(QStringLiteral("protontricks-launch"));
         if (!protontricks.isEmpty()) {
             if (startExternal(protontricks, {QStringLiteral("--no-term"), wowPath})) {
@@ -185,8 +182,8 @@ MainWindow::MainWindow(QWidget *parent)
             }
         }
 
-        // Fallback for systems without Protontricks. This deliberately uses
-        // Wine directly rather than QDesktopServices, avoiding the KIO block.
+        // If Protontricks is missing, use Wine directly.
+        // QDesktopServices would run into the same KIO restriction.
         const QString wine = QStandardPaths::findExecutable(QStringLiteral("wine"));
         if (!wine.isEmpty()) {
             if (startExternal(wine, {wowPath})) {
@@ -260,9 +257,8 @@ MainWindow::MainWindow(QWidget *parent)
                 m_realmlist = realmlist;
 
                 for (const PatchScanResult &result : results) {
-                    // Every result originates from a validated required manifest entry.
-                    // Full Repair deliberately queues all of them, even when the local
-                    // copy currently matches or could not be read during the scan.
+                    // These are already validated required files from the manifest.
+                    // Full Repair downloads all of them again regardless of the local state.
                     allRequiredFiles.push_back(result.file);
 
                     if (!result.error.isEmpty()) {
@@ -291,9 +287,8 @@ MainWindow::MainWindow(QWidget *parent)
                 if (!realmlist.isEmpty())
                     appendLog(QStringLiteral("Realm: %1").arg(realmlist));
 
-                // Full Repair intentionally ignores the local hash state and downloads
-                // every required file from the current manifest again. Optional manifest
-                // entries stay untouched, so user-selected optional content is not forced.
+                // Full Repair downloads every required file again.
+                // Optional files are left alone.
                 if (m_fullRepairRequested) {
                     m_fullRepairRequested = false;
 
@@ -316,8 +311,8 @@ MainWindow::MainWindow(QWidget *parent)
 
                 const int updates = missing + mismatched;
                 if (errors > 0) {
-                    // Do not overwrite files during a normal update when the local scan
-                    // itself was incomplete. Full Repair is handled above on purpose.
+                    // Do not overwrite a file during a normal update if its scan failed.
+                    // Full Repair can still force a clean download.
                     m_pendingUpdates.clear();
                     m_checkButton->setText(QStringLiteral("Check for updates"));
                     m_status->setText(QStringLiteral("Check completed with %1 error(s)").arg(errors));
@@ -371,7 +366,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_status->setText(QStringLiteral("Update complete. Verifying files..."));
         appendLog(QStringLiteral("Update complete. Verifying local files..."));
 
-        // Keep the UI locked until the post-update verification is finished.
+        // Keep the controls disabled until the verification is done.
         m_updater->scan(m_gamePath->text(), m_manifest);
     });
 
@@ -393,7 +388,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_status->setText(QStringLiteral("Session expired"));
         appendLog(QStringLiteral("API session expired. Please log in again."));
 
-        // Re-authenticate and obtain a fresh manifest before another update attempt.
+        // Get a fresh login and manifest before trying the update again.
         m_auth->fetchGamesManifest();
     });
 }

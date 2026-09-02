@@ -675,8 +675,8 @@ bool AddonManager::installArchive(const AddonInfo &addon,
         if (components.isEmpty())
             continue;
 
-        // Ignore loose root-level files such as README files. WoW AddOns are
-        // installed as top-level directories below Interface/AddOns.
+        // Only AddOn directories belong in Interface/AddOns.
+        // Ignore loose files like README files.
         if (components.size() == 1 && archive_entry_filetype(entry) == AE_IFREG) {
             archive_read_data_skip(archive);
             continue;

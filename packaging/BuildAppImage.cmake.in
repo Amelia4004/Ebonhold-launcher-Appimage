@@ -76,6 +76,9 @@ message(STATUS "Bundling Qt and creating AppImage...")
 execute_process(
     COMMAND "@CMAKE_COMMAND@" -E env
         "APPIMAGE_EXTRACT_AND_RUN=1"
+        # linuxdeploy brings its own strip binary.
+        # On Arch/CachyOS it can be too old for newer ELF sections like .relr.dyn.
+        # Disable stripping here so the AppImage build does not fail.
         "NO_STRIP=1"
         "QMAKE=${QMAKE_EXECUTABLE}"
         "PATH=${TOOLS_DIR}:$ENV{PATH}"
