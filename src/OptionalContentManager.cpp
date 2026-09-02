@@ -1,4 +1,5 @@
 #include "OptionalContentManager.h"
+#include "SafeFilesystem.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -103,12 +104,20 @@ std::optional<PatchFile> OptionalContentManager::fileForKind(HdPatchKind kind) c
 
 QString OptionalContentManager::destinationForKind(HdPatchKind kind) const
 {
-    return QDir(m_gameDirectory).filePath(pathForKind(kind));
+    QString destination;
+    if (!SafeFilesystem::resolveDestination(m_gameDirectory,
+                                            pathForKind(kind),
+                                            false,
+                                            &destination,
+                                            nullptr)) {
+        return {};
+    }
+    return destination;
 }
 
 HdPatchInfo OptionalContentManager::scanOne(const QString &gameDirectory,
-                                            const QJsonObject &manifest,
-                                            HdPatchKind kind)
+                                             const QJsonObject &manifest,
+                                             HdPatchKind kind)
 {
     HdPatchInfo info;
     info.kind = kind;
@@ -122,9 +131,22 @@ HdPatchInfo OptionalContentManager::scanOne(const QString &gameDirectory,
         info.error = QStringLiteral("This optional file is not present in the current manifest.");
         return info;
     }
-    info.file = *manifestFile;
 
-    const QString destination = QDir(gameDirectory).filePath(info.relativePath);
+    info.file = *manifestFile;
+    QString destination;
+    QString pathError;
+    if (!SafeFilesystem::resolveDestination(gameDirectory,
+                                            info.relativePath,
+                                            false,
+                                            &destination,
+                                            &pathError)) {
+        info.status = HdPatchStatus::Error;
+        info.error = pathError.isEmpty()
+                         ? QStringLiteral("Unsafe HD patch destination.")
+                         : pathError;
+        return info;
+    }
+
     QFile file(destination);
     if (!file.exists()) {
         info.status = HdPatchStatus::NotInstalled;
@@ -219,15 +241,27 @@ void OptionalContentManager::remove(HdPatchKind kind)
         return;
     }
 
-    const QString destination = destinationForKind(kind);
+    QString destination;
+    QString pathError;
+    if (!SafeFilesystem::resolveDestination(m_gameDirectory,
+                                            pathForKind(kind),
+                                            false,
+                                            &destination,
+                                            &pathError)) {
+        emit operationFailed(pathError.isEmpty()
+                                 ? QStringLiteral("Unsafe HD patch destination.")
+                                 : pathError);
+        return;
+    }
+
     const QFileInfo info(destination);
-    if (!info.exists() && !info.isSymLink()) {
+    if (!info.exists()) {
         emit operationFinished(QStringLiteral("%1 is already not installed.").arg(titleForKind(kind)));
         refresh();
         return;
     }
-    if (info.isDir() && !info.isSymLink()) {
-        emit operationFailed(QStringLiteral("Refusing to remove a directory where an HD patch file was expected."));
+    if (!info.isFile() || info.isSymLink()) {
+        emit operationFailed(QStringLiteral("Refusing to remove an unsafe HD patch path."));
         return;
     }
 

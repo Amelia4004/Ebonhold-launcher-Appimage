@@ -3,6 +3,7 @@
 #include "AuthManager.h"
 #include "UpdateManager.h"
 #include "OptionalContentDialog.h"
+#include "SafeFilesystem.h"
 
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -10,6 +11,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFile>
+#include <QSaveFile>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -714,14 +716,21 @@ void MainWindow::showLauncherScriptsDialog()
     settings.setValue(QStringLiteral("launcher/winePrefix"), customPrefix);
     settings.setValue(QStringLiteral("launcher/lutrisSlug"), slug);
 
-    QDir root(gameDirectory);
-    if (!root.mkpath(QStringLiteral("launcher"))) {
-        QMessageBox::critical(this, QStringLiteral("Launcher scripts"),
-                              QStringLiteral("Could not create the launcher directory."));
+    QString launcherDirectory;
+    QString launcherPathError;
+    if (!SafeFilesystem::ensureDirectory(gameDirectory,
+                                         QStringLiteral("launcher"),
+                                         &launcherDirectory,
+                                         &launcherPathError)) {
+        QMessageBox::critical(
+            this,
+            QStringLiteral("Launcher scripts"),
+            launcherPathError.isEmpty()
+                ? QStringLiteral("Could not safely create the launcher directory.")
+                : launcherPathError);
         return;
     }
 
-    const QString launcherDirectory = root.filePath(QStringLiteral("launcher"));
     const QString header = QStringLiteral(
         "#!/usr/bin/env bash\n"
         "set -e\n"
@@ -739,21 +748,53 @@ void MainWindow::showLauncherScriptsDialog()
     };
 
     auto writeScript = [&](const QString &name, const QString &body) -> bool {
-        const QString path = QDir(launcherDirectory).filePath(name);
-        QFile file(path);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+        QString path;
+        QString pathError;
+        if (!SafeFilesystem::resolveDestination(gameDirectory,
+                                                QStringLiteral("launcher/") + name,
+                                                true,
+                                                &path,
+                                                &pathError)) {
             return false;
-        const QByteArray data = (header + body).toUtf8();
-        if (file.write(data) != data.size())
+        }
+
+        QSaveFile file(path);
+        file.setDirectWriteFallback(false);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
             return false;
-        file.close();
-        return QFile::setPermissions(
-            path,
+
+        const QFileDevice::Permissions permissions =
             QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
             QFileDevice::ReadGroup | QFileDevice::ExeGroup |
-            QFileDevice::ReadOther | QFileDevice::ExeOther);
-    };
+            QFileDevice::ReadOther | QFileDevice::ExeOther;
 
+        if (!file.setPermissions(permissions)) {
+            file.cancelWriting();
+            return false;
+        }
+
+        const QByteArray data = (header + body).toUtf8();
+        if (file.write(data) != data.size()) {
+            file.cancelWriting();
+            return false;
+        }
+
+        QString verifiedPath;
+        if (!SafeFilesystem::resolveDestination(gameDirectory,
+                                                QStringLiteral("launcher/") + name,
+                                                false,
+                                                &verifiedPath,
+                                                &pathError) ||
+            QDir::cleanPath(verifiedPath) != QDir::cleanPath(path)) {
+            file.cancelWriting();
+            return false;
+        }
+
+        if (!file.commit())
+            return false;
+
+        return QFile::setPermissions(path, permissions);
+    };
     QStringList created;
     QStringList failed;
 

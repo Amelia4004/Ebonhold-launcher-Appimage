@@ -34,10 +34,23 @@ if(NOT INSTALL_RESULT EQUAL 0)
     message(FATAL_ERROR "cmake --install failed with exit code ${INSTALL_RESULT}")
 endif()
 
-function(download_appimage URL PATH)
-    if(NOT EXISTS "${PATH}")
-        message(STATUS "Downloading ${URL}")
+function(download_appimage URL PATH EXPECTED_SHA256)
+    set(NEEDS_DOWNLOAD TRUE)
+
+    if(EXISTS "${PATH}")
+        file(SHA256 "${PATH}" CURRENT_SHA256)
+        if("${CURRENT_SHA256}" STREQUAL "${EXPECTED_SHA256}")
+            set(NEEDS_DOWNLOAD FALSE)
+        else()
+            message(WARNING "Cached build tool failed SHA-256 verification. Downloading it again.")
+            file(REMOVE "${PATH}")
+        endif()
+    endif()
+
+    if(NEEDS_DOWNLOAD)
+        message(STATUS "Downloading pinned build tool: ${URL}")
         file(DOWNLOAD "${URL}" "${PATH}"
+            EXPECTED_HASH "SHA256=${EXPECTED_SHA256}"
             SHOW_PROGRESS
             TLS_VERIFY ON
             STATUS DOWNLOAD_STATUS
@@ -48,6 +61,12 @@ function(download_appimage URL PATH)
             file(REMOVE "${PATH}")
             message(FATAL_ERROR "Download failed: ${DOWNLOAD_MESSAGE}")
         endif()
+    endif()
+
+    file(SHA256 "${PATH}" VERIFIED_SHA256)
+    if(NOT "${VERIFIED_SHA256}" STREQUAL "${EXPECTED_SHA256}")
+        file(REMOVE "${PATH}")
+        message(FATAL_ERROR "SHA-256 verification failed for ${PATH}")
     endif()
 
     file(CHMOD "${PATH}"
@@ -62,12 +81,14 @@ set(LINUXDEPLOY "${TOOLS_DIR}/linuxdeploy-x86_64.AppImage")
 set(LINUXDEPLOY_QT "${TOOLS_DIR}/linuxdeploy-plugin-qt-x86_64.AppImage")
 
 download_appimage(
-    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+    "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage"
     "${LINUXDEPLOY}"
+    "4648f278ab3ef31f819e67c30d50f462640e5365a77637d7e6f2ad9fd0b4522a"
 )
 download_appimage(
-    "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+    "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage"
     "${LINUXDEPLOY_QT}"
+    "15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724"
 )
 
 file(REMOVE "${APPIMAGE}")

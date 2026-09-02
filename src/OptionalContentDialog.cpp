@@ -1,4 +1,5 @@
 #include "OptionalContentDialog.h"
+#include "SafeFilesystem.h"
 
 #include <QAbstractItemView>
 #include <QDateTime>
@@ -388,10 +389,17 @@ void OptionalContentDialog::updateControls()
 
 void OptionalContentDialog::openAddonFolder()
 {
-    const QString directory = QDir(m_gameDirectory).filePath(QStringLiteral("Interface/AddOns"));
-    if (!QDir().mkpath(directory)) {
-        QMessageBox::warning(this, QStringLiteral("AddOn Folder"),
-                             QStringLiteral("Could not create the AddOn folder."));
+    QString directory;
+    QString pathError;
+    if (!SafeFilesystem::ensureDirectory(m_gameDirectory,
+                                         QStringLiteral("Interface/AddOns"),
+                                         &directory,
+                                         &pathError)) {
+        QMessageBox::warning(this,
+                             QStringLiteral("AddOn Folder"),
+                             pathError.isEmpty()
+                                 ? QStringLiteral("Could not safely create the AddOn folder.")
+                                 : pathError);
         return;
     }
 
@@ -404,6 +412,7 @@ void OptionalContentDialog::openAddonFolder()
         if (!program.isEmpty())
             arguments = {QStringLiteral("open"), directory};
     }
+
     if (program.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("AddOn Folder"),
                              QStringLiteral("No desktop folder opener (xdg-open or gio) was found."));

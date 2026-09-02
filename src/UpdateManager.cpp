@@ -1,4 +1,5 @@
 #include "UpdateManager.h"
+#include "SafeFilesystem.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -10,12 +11,63 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSaveFile>
+#include <QSharedPointer>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QtConcurrent/QtConcurrentRun>
 
 namespace {
 const QUrl kPatchDownloadBase(QStringLiteral("https://api.project-ebonhold.com/api/launcher/download"));
+constexpr qint64 kMaximumGameFileDownloadBytes = 8LL * 1024LL * 1024LL * 1024LL;
+constexpr qint64 kMaximumDownloadUrlResponseBytes = 2LL * 1024LL * 1024LL;
+constexpr int kApiTransferTimeoutMs = 30000;
+
+
+using LimitedReplyBody = QSharedPointer<QByteArray>;
+
+LimitedReplyBody collectLimitedReply(QNetworkReply *reply, qint64 maximumBytes)
+{
+    auto body = LimitedReplyBody::create();
+    reply->setReadBufferSize(maximumBytes + 1);
+
+    QObject::connect(reply, &QNetworkReply::readyRead, reply,
+                     [reply, body, maximumBytes]() {
+        if (reply->property("ebonholdResponseTooLarge").toBool()) {
+            reply->readAll();
+            return;
+        }
+
+        const QByteArray chunk = reply->readAll();
+        if (static_cast<qint64>(chunk.size()) >
+            maximumBytes - static_cast<qint64>(body->size())) {
+            reply->setProperty("ebonholdResponseTooLarge", true);
+            reply->abort();
+            return;
+        }
+
+        body->append(chunk);
+    });
+
+    return body;
+}
+
+bool finishLimitedReply(QNetworkReply *reply,
+                        const LimitedReplyBody &body,
+                        qint64 maximumBytes)
+{
+    if (reply->property("ebonholdResponseTooLarge").toBool())
+        return false;
+
+    const QByteArray tail = reply->readAll();
+    if (static_cast<qint64>(tail.size()) >
+        maximumBytes - static_cast<qint64>(body->size())) {
+        reply->setProperty("ebonholdResponseTooLarge", true);
+        return false;
+    }
+
+    body->append(tail);
+    return true;
+}
 
 QByteArray decodeManifestMd5(const QString &encoded)
 {
@@ -48,21 +100,7 @@ bool safeRelativePath(const QString &path)
     return true;
 }
 
-bool destinationInsideRoot(const QString &rootDirectory,
-                           const QString &relativePath,
-                           QString *destination)
-{
-    const QDir root(rootDirectory);
-    const QString rootPath = QDir::cleanPath(root.absolutePath());
-    const QString candidate = QDir::cleanPath(root.absoluteFilePath(relativePath));
-    const QString prefix = rootPath + QDir::separator();
 
-    if (candidate != rootPath && !candidate.startsWith(prefix))
-        return false;
-
-    *destination = candidate;
-    return true;
-}
 
 void appendFiles(const QJsonArray &array, QVector<PatchFile> *files, QString *error)
 {
@@ -186,18 +224,24 @@ QVector<PatchFile> UpdateManager::collectRequiredFiles(const QJsonObject &manife
 }
 
 QVector<PatchScanResult> UpdateManager::scanFiles(const QString &gameDirectory,
-                                                  const QVector<PatchFile> &files)
+                                                   const QVector<PatchFile> &files)
 {
     QVector<PatchScanResult> results;
     results.reserve(files.size());
-
     for (const PatchFile &patch : files) {
         PatchScanResult result;
         result.file = patch;
 
         QString destination;
-        if (!destinationInsideRoot(gameDirectory, patch.relativePath, &destination)) {
-            result.error = QStringLiteral("Unsafe destination path.");
+        QString pathError;
+        if (!SafeFilesystem::resolveDestination(gameDirectory,
+                                                patch.relativePath,
+                                                false,
+                                                &destination,
+                                                &pathError)) {
+            result.error = pathError.isEmpty()
+                               ? QStringLiteral("Unsafe destination path.")
+                               : pathError;
             results.push_back(result);
             continue;
         }
@@ -274,7 +318,9 @@ QNetworkRequest UpdateManager::authenticatedRequest(const QUrl &url) const
     request.setRawHeader("X-Client-Id", "EbonholdLauncher");
     request.setRawHeader("Origin", "https://project-ebonhold.com");
     request.setRawHeader("Referer", "https://project-ebonhold.com/download");
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::SameOriginRedirectPolicy);
+    request.setTransferTimeout(kApiTransferTimeoutMs);
     return request;
 }
 
@@ -356,14 +402,25 @@ void UpdateManager::requestDownloadUrl(const PatchFile &file)
     url.setQuery(query);
 
     QNetworkReply *reply = m_network.get(authenticatedRequest(url));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, file]() {
-        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const QByteArray body = reply->readAll();
+    const auto body = collectLimitedReply(reply, kMaximumDownloadUrlResponseBytes);
+
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, file, body]() {
+        const int status =
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool responseOk =
+            finishLimitedReply(reply, body, kMaximumDownloadUrlResponseBytes);
         const auto networkError = reply->error();
         reply->deleteLater();
 
         if (!m_updating)
             return;
+
+        if (!responseOk) {
+            failUpdate(QStringLiteral("The download URL response for %1 was too large.")
+                           .arg(file.relativePath));
+            return;
+        }
 
         if (status == 401 || status == 403) {
             m_updating = false;
@@ -371,30 +428,69 @@ void UpdateManager::requestDownloadUrl(const PatchFile &file)
             return;
         }
 
-        if (networkError != QNetworkReply::NoError || status < 200 || status >= 300) {
-            QString message = apiMessage(body);
-            if (message.isEmpty())
-                message = QStringLiteral("Could not get a download URL for %1 (HTTP %2).")
-                              .arg(file.relativePath)
-                              .arg(status);
+        if (networkError != QNetworkReply::NoError ||
+            status < 200 || status >= 300) {
+            QString message = apiMessage(*body);
+            if (message.isEmpty()) {
+                message =
+                    QStringLiteral("Could not get a download URL for %1 (HTTP %2).")
+                        .arg(file.relativePath)
+                        .arg(status);
+            }
             failUpdate(message);
             return;
         }
 
         QJsonParseError parseError;
-        const QJsonDocument document = QJsonDocument::fromJson(body, &parseError);
-        if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-            failUpdate(QStringLiteral("Invalid download response for %1.").arg(file.relativePath));
+        const QJsonDocument document =
+            QJsonDocument::fromJson(*body, &parseError);
+        if (parseError.error != QJsonParseError::NoError ||
+            !document.isObject()) {
+            failUpdate(QStringLiteral("Invalid download response for %1.")
+                           .arg(file.relativePath));
             return;
         }
 
         const QJsonObject root = document.object();
+        if (root.contains(QStringLiteral("success")) &&
+            !root.value(QStringLiteral("success")).toBool()) {
+            failUpdate(QStringLiteral("The API rejected the download request for %1.")
+                           .arg(file.relativePath));
+            return;
+        }
+
+        const QJsonArray responseFiles =
+            root.value(QStringLiteral("files")).toArray();
+
         QString downloadUrl;
-        const QJsonArray responseFiles = root.value(QStringLiteral("files")).toArray();
-        if (!responseFiles.isEmpty() && responseFiles.first().isObject())
-            downloadUrl = responseFiles.first().toObject().value(QStringLiteral("url")).toString();
-        if (downloadUrl.isEmpty())
+        if (!responseFiles.isEmpty()) {
+            if (responseFiles.size() != 1 ||
+                !responseFiles.first().isObject()) {
+                failUpdate(QStringLiteral("The API returned an unexpected file list for %1.")
+                               .arg(file.relativePath));
+                return;
+            }
+
+            const QJsonObject responseFile =
+                responseFiles.first().toObject();
+
+            int responseId =
+                responseFile.value(QStringLiteral("file_id")).toInt();
+            if (responseId <= 0)
+                responseId =
+                    responseFile.value(QStringLiteral("id")).toInt();
+
+            if (responseId > 0 && responseId != file.id) {
+                failUpdate(QStringLiteral("The API returned the wrong file ID for %1.")
+                               .arg(file.relativePath));
+                return;
+            }
+
+            downloadUrl =
+                responseFile.value(QStringLiteral("url")).toString();
+        } else {
             downloadUrl = root.value(QStringLiteral("url")).toString();
+        }
 
         const QUrl parsedUrl(downloadUrl);
         if (!safeHttpsUrl(parsedUrl)) {
@@ -410,14 +506,15 @@ void UpdateManager::requestDownloadUrl(const PatchFile &file)
 void UpdateManager::startFileDownload(const PatchFile &file, const QUrl &url)
 {
     QString destination;
-    if (!destinationInsideRoot(m_gameDirectory, file.relativePath, &destination)) {
-        failUpdate(QStringLiteral("Unsafe destination path for %1.").arg(file.relativePath));
-        return;
-    }
-
-    const QFileInfo destinationInfo(destination);
-    if (!QDir().mkpath(destinationInfo.absolutePath())) {
-        failUpdate(QStringLiteral("Could not create the directory for %1.").arg(file.relativePath));
+    QString pathError;
+    if (!SafeFilesystem::resolveDestination(m_gameDirectory,
+                                            file.relativePath,
+                                            true,
+                                            &destination,
+                                            &pathError)) {
+        failUpdate(QStringLiteral("Unsafe destination path for %1: %2")
+                       .arg(file.relativePath,
+                            pathError.isEmpty() ? QStringLiteral("path validation failed") : pathError));
         return;
     }
 
@@ -438,7 +535,9 @@ void UpdateManager::startFileDownload(const PatchFile &file, const QUrl &url)
 
     QNetworkRequest request(url);
     request.setRawHeader("User-Agent", "EbonholdLauncher/1.0");
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    request.setTransferTimeout(60000);
     m_downloadReply = m_network.get(request);
 
     connect(m_downloadReply, &QNetworkReply::readyRead, this, [this, file]() {
@@ -449,83 +548,124 @@ void UpdateManager::startFileDownload(const PatchFile &file, const QUrl &url)
         if (chunk.isEmpty())
             return;
 
+        if (m_outputFile->size() > kMaximumGameFileDownloadBytes - chunk.size()) {
+            failUpdate(QStringLiteral("Download for %1 exceeded the maximum allowed file size.")
+                           .arg(file.relativePath));
+            return;
+        }
+
         m_downloadHash->addData(chunk);
         if (m_outputFile->write(chunk) != chunk.size()) {
             const QString error = m_outputFile->errorString();
-            m_downloadReply->abort();
             failUpdate(QStringLiteral("Could not write %1: %2").arg(file.relativePath, error));
         }
     });
 
     connect(m_downloadReply, &QNetworkReply::downloadProgress, this,
             [this, file](qint64 received, qint64 total) {
+                if (received > kMaximumGameFileDownloadBytes ||
+                    total > kMaximumGameFileDownloadBytes) {
+                    failUpdate(QStringLiteral("Download for %1 exceeded the maximum allowed file size.")
+                                   .arg(file.relativePath));
+                    return;
+                }
+
                 if (total <= 0) {
                     const int base = (m_updateIndex * 100) / qMax(1, m_updateFiles.size());
                     emit updateProgress(base, file.relativePath);
                     return;
                 }
 
-                const double fileFraction = static_cast<double>(received) / static_cast<double>(total);
-                const double overall = (static_cast<double>(m_updateIndex) + fileFraction) /
-                                       static_cast<double>(qMax(1, m_updateFiles.size()));
-                emit updateProgress(qBound(0, static_cast<int>(overall * 100.0), 100), file.relativePath);
+                const double fileFraction =
+                    static_cast<double>(received) / static_cast<double>(total);
+                const double overall =
+                    (static_cast<double>(m_updateIndex) + fileFraction) /
+                    static_cast<double>(qMax(1, m_updateFiles.size()));
+                emit updateProgress(qBound(0, static_cast<int>(overall * 100.0), 100),
+                                    file.relativePath);
             });
 
-    connect(m_downloadReply, &QNetworkReply::finished, this, [this, file]() {
-        if (!m_downloadReply)
-            return;
+    connect(m_downloadReply, &QNetworkReply::finished, this,
+            [this, file, destination]() {
+                if (!m_downloadReply)
+                    return;
 
-        QNetworkReply *reply = m_downloadReply;
-        m_downloadReply = nullptr;
+                QNetworkReply *reply = m_downloadReply;
+                m_downloadReply = nullptr;
 
-        if (!m_updating) {
-            reply->deleteLater();
-            return;
-        }
+                if (!m_updating) {
+                    reply->deleteLater();
+                    return;
+                }
 
-        const auto networkError = reply->error();
-        const QString networkMessage = reply->errorString();
+                const auto networkError = reply->error();
+                const QString networkMessage = reply->errorString();
 
-        if (m_outputFile && reply->bytesAvailable() > 0) {
-            const QByteArray chunk = reply->readAll();
-            m_downloadHash->addData(chunk);
-            if (m_outputFile->write(chunk) != chunk.size()) {
+                if (m_outputFile && reply->bytesAvailable() > 0) {
+                    const QByteArray chunk = reply->readAll();
+                    if (m_outputFile->size() > kMaximumGameFileDownloadBytes - chunk.size()) {
+                        reply->deleteLater();
+                        failUpdate(QStringLiteral("Download for %1 exceeded the maximum allowed file size.")
+                                       .arg(file.relativePath));
+                        return;
+                    }
+
+                    m_downloadHash->addData(chunk);
+                    if (m_outputFile->write(chunk) != chunk.size()) {
+                        reply->deleteLater();
+                        failUpdate(QStringLiteral("Could not finish writing %1.")
+                                       .arg(file.relativePath));
+                        return;
+                    }
+                }
+
                 reply->deleteLater();
-                failUpdate(QStringLiteral("Could not finish writing %1.").arg(file.relativePath));
-                return;
-            }
-        }
 
-        reply->deleteLater();
+                if (networkError != QNetworkReply::NoError) {
+                    failUpdate(QStringLiteral("Download failed for %1: %2")
+                                   .arg(file.relativePath, networkMessage));
+                    return;
+                }
 
-        if (networkError != QNetworkReply::NoError) {
-            failUpdate(QStringLiteral("Download failed for %1: %2")
-                           .arg(file.relativePath, networkMessage));
-            return;
-        }
+                const QByteArray actualMd5 = m_downloadHash->result().toHex().toLower();
+                if (actualMd5 != file.expectedMd5) {
+                    failUpdate(QStringLiteral(
+                                   "Checksum mismatch for %1. The existing file was left untouched.")
+                                   .arg(file.relativePath));
+                    return;
+                }
 
-        const QByteArray actualMd5 = m_downloadHash->result().toHex().toLower();
-        if (actualMd5 != file.expectedMd5) {
-            failUpdate(QStringLiteral("Checksum mismatch for %1. The existing file was left untouched.")
-                           .arg(file.relativePath));
-            return;
-        }
+                QString verifiedDestination;
+                QString pathError;
+                if (!SafeFilesystem::resolveDestination(m_gameDirectory,
+                                                        file.relativePath,
+                                                        false,
+                                                        &verifiedDestination,
+                                                        &pathError) ||
+                    QDir::cleanPath(verifiedDestination) != QDir::cleanPath(destination)) {
+                    failUpdate(QStringLiteral("Destination for %1 changed during download.")
+                                   .arg(file.relativePath));
+                    return;
+                }
 
-        if (!m_outputFile->commit()) {
-            const QString error = m_outputFile->errorString();
-            failUpdate(QStringLiteral("Could not replace %1: %2").arg(file.relativePath, error));
-            return;
-        }
+                if (!m_outputFile->commit()) {
+                    const QString error = m_outputFile->errorString();
+                    failUpdate(QStringLiteral("Could not replace %1: %2")
+                                   .arg(file.relativePath, error));
+                    return;
+                }
 
-        delete m_outputFile;
-        m_outputFile = nullptr;
-        delete m_downloadHash;
-        m_downloadHash = nullptr;
+                delete m_outputFile;
+                m_outputFile = nullptr;
+                delete m_downloadHash;
+                m_downloadHash = nullptr;
 
-        emit updateFileFinished(m_updateIndex + 1, m_updateFiles.size(), file.relativePath);
-        ++m_updateIndex;
-        downloadNext();
-    });
+                emit updateFileFinished(m_updateIndex + 1,
+                                        m_updateFiles.size(),
+                                        file.relativePath);
+                ++m_updateIndex;
+                downloadNext();
+            });
 }
 
 bool UpdateManager::writeRealmlist(QString *error) const
@@ -533,20 +673,36 @@ bool UpdateManager::writeRealmlist(QString *error) const
     if (m_realmlist.trimmed().isEmpty())
         return true;
 
+    const QString realmlist = m_realmlist.trimmed();
+    if (realmlist.size() > 255) {
+        *error = QStringLiteral("The realmlist value is too long.");
+        return false;
+    }
+
+    for (const QChar ch : realmlist) {
+        if (ch.unicode() < 0x20 || ch.unicode() == 0x7f) {
+            *error = QStringLiteral("The realmlist value contains control characters.");
+            return false;
+        }
+    }
+
     const QString relativePath = QStringLiteral("Data/enUS/realmlist.wtf");
     QString destination;
-    if (!destinationInsideRoot(m_gameDirectory, relativePath, &destination)) {
-        *error = QStringLiteral("Unsafe realmlist destination path.");
+    QString pathError;
+    if (!SafeFilesystem::resolveDestination(m_gameDirectory,
+                                            relativePath,
+                                            true,
+                                            &destination,
+                                            &pathError)) {
+        *error = QStringLiteral("Unsafe realmlist destination path: %1")
+                     .arg(pathError.isEmpty()
+                              ? QStringLiteral("path validation failed")
+                              : pathError);
         return false;
     }
 
-    const QFileInfo info(destination);
-    if (!QDir().mkpath(info.absolutePath())) {
-        *error = QStringLiteral("Could not create Data/enUS for realmlist.wtf.");
-        return false;
-    }
-
-    const QByteArray wanted = QStringLiteral("set realmlist %1\n").arg(m_realmlist.trimmed()).toUtf8();
+    const QByteArray wanted =
+        QStringLiteral("set realmlist %1\n").arg(realmlist).toUtf8();
 
     QFile existing(destination);
     if (existing.open(QIODevice::ReadOnly) && existing.readAll() == wanted)
@@ -555,12 +711,33 @@ bool UpdateManager::writeRealmlist(QString *error) const
     QSaveFile output(destination);
     output.setDirectWriteFallback(false);
     if (!output.open(QIODevice::WriteOnly)) {
-        *error = QStringLiteral("Could not write realmlist.wtf: %1").arg(output.errorString());
+        *error = QStringLiteral("Could not write realmlist.wtf: %1")
+                     .arg(output.errorString());
         return false;
     }
 
-    if (output.write(wanted) != wanted.size() || !output.commit()) {
-        *error = QStringLiteral("Could not update realmlist.wtf: %1").arg(output.errorString());
+    if (output.write(wanted) != wanted.size()) {
+        output.cancelWriting();
+        *error = QStringLiteral("Could not update realmlist.wtf: %1")
+                     .arg(output.errorString());
+        return false;
+    }
+
+    QString verifiedDestination;
+    if (!SafeFilesystem::resolveDestination(m_gameDirectory,
+                                            relativePath,
+                                            false,
+                                            &verifiedDestination,
+                                            &pathError) ||
+        QDir::cleanPath(verifiedDestination) != QDir::cleanPath(destination)) {
+        output.cancelWriting();
+        *error = QStringLiteral("The realmlist destination changed while it was being written.");
+        return false;
+    }
+
+    if (!output.commit()) {
+        *error = QStringLiteral("Could not update realmlist.wtf: %1")
+                     .arg(output.errorString());
         return false;
     }
 
