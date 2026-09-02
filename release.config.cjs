@@ -22,6 +22,10 @@ module.exports = {
             path: "build/dist/EbonholdUpdater-*-x86_64.AppImage.sha256",
             label: "SHA-256 checksum",
           },
+          {
+            path: "README-AppImage.md",
+            label: "AppImage Installation & Usage Guide",
+          },
         ],
         successComment: false,
         failComment: false,
