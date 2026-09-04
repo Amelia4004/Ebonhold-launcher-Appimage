@@ -34,6 +34,45 @@ if(NOT INSTALL_RESULT EQUAL 0)
     message(FATAL_ERROR "cmake --install failed with exit code ${INSTALL_RESULT}")
 endif()
 
+# Bundle libssl and libcrypto as a matching pair.
+# Qt loads OpenSSL dynamically, so linuxdeploy may otherwise bundle only
+# libcrypto while using libssl from the host, causing version mismatches.
+set(OPENSSL_BUNDLE_DIR "")
+
+foreach(CANDIDATE_DIR IN ITEMS
+    "/usr/lib/@CMAKE_LIBRARY_ARCHITECTURE@"
+    "/lib/@CMAKE_LIBRARY_ARCHITECTURE@"
+    "/usr/lib"
+    "/lib"
+)
+    if(EXISTS "${CANDIDATE_DIR}/libssl.so.3"
+       AND EXISTS "${CANDIDATE_DIR}/libcrypto.so.3")
+        set(OPENSSL_BUNDLE_DIR "${CANDIDATE_DIR}")
+        break()
+    endif()
+endforeach()
+
+if(OPENSSL_BUNDLE_DIR STREQUAL "")
+    message(FATAL_ERROR
+        "Could not find a matching libssl.so.3/libcrypto.so.3 pair.")
+endif()
+
+file(MAKE_DIRECTORY "${APPDIR}/usr/lib")
+
+file(COPY_FILE
+    "${OPENSSL_BUNDLE_DIR}/libssl.so.3"
+    "${APPDIR}/usr/lib/libssl.so.3"
+    ONLY_IF_DIFFERENT
+)
+
+file(COPY_FILE
+    "${OPENSSL_BUNDLE_DIR}/libcrypto.so.3"
+    "${APPDIR}/usr/lib/libcrypto.so.3"
+    ONLY_IF_DIFFERENT
+)
+
+message(STATUS "Bundled matching OpenSSL libraries from ${OPENSSL_BUNDLE_DIR}")
+
 function(download_appimage URL PATH EXPECTED_SHA256)
     set(NEEDS_DOWNLOAD TRUE)
 
