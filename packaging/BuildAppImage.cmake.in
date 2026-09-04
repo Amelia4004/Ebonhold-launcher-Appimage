@@ -34,7 +34,7 @@ if(NOT INSTALL_RESULT EQUAL 0)
     message(FATAL_ERROR "cmake --install failed with exit code ${INSTALL_RESULT}")
 endif()
 
-# Bundle libssl and libcrypto as a matching pair.
+# Bundle libssl and libcrypto as a matching pair for portable TLS.
 # Qt loads OpenSSL dynamically, so linuxdeploy may otherwise bundle only
 # libcrypto while using libssl from the host, causing version mismatches.
 set(OPENSSL_BUNDLE_DIR "")
